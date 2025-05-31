@@ -3383,7 +3383,7 @@ impl Cpu {
                 let offset = (inst as i32 as i64) >> 20;
                 let target = ((self.xregs.read(rs1) as i64).wrapping_add(offset)) & !1;
 
-                let new_pc = (target as u64).wrapping_sub(4);
+                let new_pc = (target as u64);
                 let mut handled = false;
                 if let Some(jh) = &self.jump_handler {
                     if jh.should_handle(new_pc) {
@@ -3393,7 +3393,7 @@ impl Cpu {
                 }
                 if !handled {
                     self.xregs.write(REG_RA, self.pc.wrapping_add(4));
-                    self.pc = new_pc;
+                    self.pc = new_pc.wrapping_sub(4);
                 }
             }
             0x6F => {
@@ -3409,7 +3409,7 @@ impl Cpu {
                 let imm10 = (inst >> 20) & 0x7fe; // imm[10:1]
                 let offset = imm20 | imm19 | imm11 | imm10;
 
-                let new_pc = self.pc.wrapping_add(offset).wrapping_sub(4);
+                let new_pc = self.pc.wrapping_add(offset);
                 let mut handled = false;
 
                 if let Some(jh) = &self.jump_handler {
@@ -3420,7 +3420,7 @@ impl Cpu {
                 }
                 if !handled {
                     self.xregs.write(REG_RA, self.pc.wrapping_add(4));
-                    self.pc = new_pc;
+                    self.pc = new_pc.wrapping_sub(4)
                 }
             }
             0x73 => {
