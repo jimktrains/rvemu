@@ -6,17 +6,73 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::FpCategory;
 
-use crate::{
-    bus::{Bus, DRAM_BASE},
-    csr::*,
-    devices::{
-        uart::UART_IRQ,
-        virtio_blk::{Virtio, VIRTIO_IRQ},
-    },
-    dram::DRAM_SIZE,
-    exception::Exception,
-    interrupt::Interrupt,
-};
+use crate::{bus::Bus, csr::*, exception::Exception, interrupt::Interrupt};
+
+pub const REG_FT0: u64 = 0;
+pub const REG_FT1: u64 = 1;
+pub const REG_FT2: u64 = 2;
+pub const REG_FT3: u64 = 3;
+pub const REG_FT4: u64 = 4;
+pub const REG_FT5: u64 = 5;
+pub const REG_FT6: u64 = 6;
+pub const REG_FT7: u64 = 7;
+pub const REG_FS0: u64 = 8;
+pub const REG_FS1: u64 = 9;
+pub const REG_FA0: u64 = 10;
+pub const REG_FA1: u64 = 11;
+pub const REG_FA2: u64 = 12;
+pub const REG_FA3: u64 = 13;
+pub const REG_FA4: u64 = 14;
+pub const REG_FA5: u64 = 15;
+pub const REG_FA6: u64 = 16;
+pub const REG_FA7: u64 = 17;
+pub const REG_FS2: u64 = 18;
+pub const REG_FS3: u64 = 19;
+pub const REG_FS4: u64 = 20;
+pub const REG_FS5: u64 = 21;
+pub const REG_FS6: u64 = 22;
+pub const REG_FS7: u64 = 23;
+pub const REG_FS8: u64 = 24;
+pub const REG_FS9: u64 = 25;
+pub const REG_FS10: u64 = 26;
+pub const REG_FS11: u64 = 27;
+pub const REG_FT8: u64 = 28;
+pub const REG_FT9: u64 = 29;
+pub const REG_FT10: u64 = 30;
+pub const REG_FT11: u64 = 31;
+
+pub const REG_ZERO: u64 = 0;
+pub const REG_RA: u64 = 1;
+pub const REG_SP: u64 = 2;
+pub const REG_GP: u64 = 3;
+pub const REG_TP: u64 = 4;
+pub const REG_T0: u64 = 5;
+pub const REG_T1: u64 = 6;
+pub const REG_T2: u64 = 7;
+pub const REG_S0: u64 = 8;
+pub const REG_S1: u64 = 9;
+pub const REG_A0: u64 = 10;
+pub const REG_A1: u64 = 11;
+pub const REG_A2: u64 = 12;
+pub const REG_A3: u64 = 13;
+pub const REG_A4: u64 = 14;
+pub const REG_A5: u64 = 15;
+pub const REG_A6: u64 = 16;
+pub const REG_A7: u64 = 17;
+pub const REG_S2: u64 = 18;
+pub const REG_S3: u64 = 19;
+pub const REG_S4: u64 = 20;
+pub const REG_S5: u64 = 21;
+pub const REG_S6: u64 = 22;
+pub const REG_S7: u64 = 23;
+pub const REG_S8: u64 = 24;
+pub const REG_S9: u64 = 25;
+pub const REG_S10: u64 = 26;
+pub const REG_S11: u64 = 27;
+pub const REG_T3: u64 = 28;
+pub const REG_T4: u64 = 29;
+pub const REG_T5: u64 = 30;
+pub const REG_T6: u64 = 31;
 
 /// The number of registers.
 pub const REGISTERS_COUNT: usize = 32;
@@ -66,7 +122,7 @@ pub enum Mode {
 }
 
 /// The integer registers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct XRegisters {
     xregs: [u64; REGISTERS_COUNT],
 }
@@ -75,8 +131,6 @@ impl XRegisters {
     /// Create a new `XRegisters` object.
     pub fn new() -> Self {
         let mut xregs = [0; REGISTERS_COUNT];
-        // The stack pointer is set in the default maximum memory size + the start address of dram.
-        xregs[2] = DRAM_BASE + DRAM_SIZE;
         // From riscv-pk:
         // https://github.com/riscv/riscv-pk/blob/master/machine/mentry.S#L233-L235
         //   save a0 and a1; arguments from previous boot loader stage:
@@ -141,7 +195,7 @@ impl fmt::Display for XRegisters {
 }
 
 /// The floating-point registers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FRegisters {
     fregs: [f64; REGISTERS_COUNT],
 }
@@ -209,6 +263,11 @@ impl fmt::Display for FRegisters {
     }
 }
 
+pub trait JumpLinkHandler {
+    fn should_handle(&self, new_pc: u64) -> bool;
+    fn handle(&self, new_pc: u64, cpu: &Cpu) -> (XRegisters, FRegisters);
+}
+
 /// The CPU to contain registers, a program counter, status, and a privileged mode.
 pub struct Cpu {
     /// 64-bit integer registers.
@@ -223,6 +282,9 @@ pub struct Cpu {
     pub mode: Mode,
     /// System bus.
     pub bus: Bus,
+
+    pub jump_handler: Option<Box<dyn JumpLinkHandler>>,
+
     /// SV39 paging flag.
     enable_paging: bool,
     /// Physical page number (PPN) × PAGE_SIZE (4096).
@@ -240,6 +302,10 @@ pub struct Cpu {
     pub pre_inst: u64,
 }
 
+// impl fmt::Debug for Cpu {
+//
+// }
+
 impl Cpu {
     /// Create a new `Cpu` object.
     pub fn new() -> Cpu {
@@ -250,6 +316,7 @@ impl Cpu {
             state: State::new(),
             mode: Mode::Machine,
             bus: Bus::new(),
+            jump_handler: None,
             enable_paging: false,
             page_table: 0,
             reservation_set: Vec::new(),
@@ -258,6 +325,10 @@ impl Cpu {
             is_count: false,
             pre_inst: 0,
         }
+    }
+
+    pub fn with_jump_link_handler(&mut self, jh: Box<dyn JumpLinkHandler>) {
+        self.jump_handler = Some(jh);
     }
 
     fn debug(&self, _inst: u64, _name: &str) {
@@ -314,6 +385,19 @@ impl Cpu {
         }
     }
 
+    pub fn print_registers(&self) {
+        println!("{}", self.xregs);
+        println!("{}", self.fregs);
+        println!("{}", self.state);
+        println!("pc: {:#x}    prev_instr: {:#x}", self.pc, self.pre_inst);
+    }
+
+    pub fn cycle(&mut self) -> Result<(Option<Interrupt>, u64), Exception> {
+        let interrupt = self.check_pending_interrupt();
+        self.devices_increment();
+        Ok((interrupt, self.execute()?))
+    }
+
     /// Check interrupt flags for all devices that can interrupt.
     pub fn check_pending_interrupt(&mut self) -> Option<Interrupt> {
         // global interrupt: PLIC (Platform Local Interrupt Controller) dispatches global
@@ -343,21 +427,9 @@ impl Cpu {
         // TODO: Take interrupts based on priorities.
 
         // Check external interrupt for uart and virtio.
-        let irq;
-        if self.bus.uart.is_interrupting() {
-            irq = UART_IRQ;
-        } else if self.bus.virtio.is_interrupting() {
-            // An interrupt is raised after a disk access is done.
-            Virtio::disk_access(self).expect("failed to access the disk");
-            irq = VIRTIO_IRQ;
-        } else {
-            irq = 0;
-        }
-
-        if irq != 0 {
+        if self.bus.is_interrupting() {
             // TODO: assume that hart is 0
             // TODO: write a value to MCLAIM if the mode is machine
-            self.bus.plic.update_pending(irq);
             self.state.write(MIP, self.state.read(MIP) | SEIP_BIT);
         }
 
@@ -1237,9 +1309,15 @@ impl Cpu {
                                     self.debug(inst, "c.jalr");
 
                                     let rs1 = (inst >> 7) & 0x1f;
-                                    let t = self.pc.wrapping_add(2);
-                                    self.pc = self.xregs.read(rs1).wrapping_sub(2);
-                                    self.xregs.write(1, t);
+                                    let new_pc = self.xregs.read(rs1).wrapping_sub(2);
+                                    if let Some(jh) = &self.jump_handler {
+                                        if jh.should_handle(new_pc) {
+                                            (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                                        }
+                                    } else {
+                                        self.pc = new_pc;
+                                        self.xregs.write(1, self.pc.wrapping_add(2));
+                                    }
                                 }
                             }
                             (1, _) => {
@@ -3287,21 +3365,23 @@ impl Cpu {
                 inst_count!(self, "jalr");
                 self.debug(inst, "jalr");
 
-                let t = self.pc.wrapping_add(4);
-
                 let offset = (inst as i32 as i64) >> 20;
                 let target = ((self.xregs.read(rs1) as i64).wrapping_add(offset)) & !1;
 
-                self.pc = (target as u64).wrapping_sub(4);
-
-                self.xregs.write(rd, t);
+                let new_pc = target as u64;
+                if let Some(jh) = &self.jump_handler {
+                    if jh.should_handle(new_pc) {
+                        (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                    }
+                } else {
+                    self.pc = new_pc;
+                    self.xregs.write(rd, self.pc.wrapping_add(4));
+                }
             }
             0x6F => {
                 // jal
                 inst_count!(self, "jal");
                 self.debug(inst, "jal");
-
-                self.xregs.write(rd, self.pc.wrapping_add(4));
 
                 // imm[20|10:1|11|19:12] = inst[31|30:21|20|19:12]
                 let offset = (((inst & 0x80000000) as i32 as i64 >> 11) as u64) // imm[20]
@@ -3309,7 +3389,15 @@ impl Cpu {
                     | ((inst >> 9) & 0x800) // imm[11]
                     | ((inst >> 20) & 0x7fe); // imm[10:1]
 
-                self.pc = self.pc.wrapping_add(offset).wrapping_sub(4);
+                let new_pc = self.pc.wrapping_add(offset);
+                if let Some(jh) = &self.jump_handler {
+                    if jh.should_handle(new_pc) {
+                        (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                    }
+                } else {
+                    self.pc = new_pc;
+                    self.xregs.write(rd, self.pc.wrapping_add(4));
+                }
             }
             0x73 => {
                 // RV32I, RVZicsr, and supervisor ISA
