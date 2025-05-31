@@ -103,7 +103,7 @@ impl Emulator {
             }
 
             match self.cpu.execute() {
-                Ok(inst) => {
+                Ok((_, _, inst)) => {
                     println!("pc: {:#x}, inst: {:#x}", self.cpu.pc.wrapping_sub(4), inst);
                     Trap::Requested
                 }
@@ -135,7 +135,7 @@ impl Emulator {
 
             // Execute an instruction.
             let trap = match self.cpu.execute() {
-                Ok(inst) => {
+                Ok((_, _, inst)) => {
                     if self.is_debug {
                         println!(
                             "pc: {:#x}, inst: {:#x}, is_inst 16? {} pre_inst: {:#x}",

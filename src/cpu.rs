@@ -392,7 +392,7 @@ impl Cpu {
         println!("pc: {:#x}    prev_instr: {:#x}", self.pc, self.pre_inst);
     }
 
-    pub fn cycle(&mut self) -> Result<(Option<Interrupt>, u64), Exception> {
+    pub fn cycle(&mut self) -> Result<(Option<Interrupt>, (u64, u64, u64)), Exception> {
         let interrupt = self.check_pending_interrupt();
         self.devices_increment();
         Ok((interrupt, self.execute()?))
@@ -710,7 +710,7 @@ impl Cpu {
     }
 
     /// Fetch the `size`-bit next instruction from the memory at the current program counter.
-    pub fn fetch(&mut self, size: u8) -> Result<u64, Exception> {
+    pub fn fetch(&mut self, size: u8) -> Result<(u64, u64, u64), Exception> {
         if size != HALFWORD && size != WORD {
             return Err(Exception::InstructionAccessFault);
         }
@@ -720,7 +720,7 @@ impl Cpu {
         // The result of the read method can be `Exception::LoadAccessFault`. In fetch(), an error
         // should be `Exception::InstructionAccessFault`.
         match self.bus.read(p_pc, size) {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok((self.pc, p_pc, value)),
             Err(_) => Err(Exception::InstructionAccessFault),
         }
     }
@@ -736,14 +736,14 @@ impl Cpu {
 
     /// Execute an instruction. Raises an exception if something is wrong, otherwise, returns
     /// the instruction executed in this cycle.
-    pub fn execute(&mut self) -> Result<u64, Exception> {
+    pub fn execute(&mut self) -> Result<(u64, u64, u64), Exception> {
         // WFI is called and pending interrupts don't exist.
         if self.idle {
-            return Ok(0);
+            return Ok((0, 0, 0));
         }
 
         // Fetch.
-        let inst16 = self.fetch(HALFWORD)?;
+        let (mut fetch_pc, mut fetch_p_pc, inst16) = self.fetch(HALFWORD)?;
         let inst;
         match inst16 & 0b11 {
             0 | 1 | 2 => {
@@ -757,14 +757,14 @@ impl Cpu {
                 self.pc += 2;
             }
             _ => {
-                inst = self.fetch(WORD)?;
+                (fetch_pc, fetch_p_pc, inst) = self.fetch(WORD)?;
                 self.execute_general(inst)?;
                 // Add 4 bytes to the program counter.
                 self.pc += 4;
             }
         }
         self.pre_inst = inst;
-        Ok(inst)
+        Ok((fetch_pc, fetch_p_pc, inst))
     }
 
     /// Execute a compressed instruction. Raised an exception if something is wrong, otherwise,
@@ -1311,13 +1311,16 @@ impl Cpu {
 
                                     let rs1 = (inst >> 7) & 0x1f;
                                     let new_pc = self.xregs.read(rs1).wrapping_sub(2);
+                                    let mut handled = false;
                                     if let Some(jh) = &self.jump_handler {
                                         if jh.should_handle(new_pc) {
                                             (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                                            handled = true;
                                         }
-                                    } else {
+                                    }
+                                    if !handled {
+                                        self.xregs.write(REG_RA, self.pc.wrapping_add(2));
                                         self.pc = new_pc;
-                                        self.xregs.write(1, self.pc.wrapping_add(2));
                                     }
                                 }
                             }
@@ -1351,7 +1354,8 @@ impl Cpu {
                         // offset[5:3|8:6] = isnt[12:10|9:7]
                         let offset = ((inst >> 1) & 0x1c0) // offset[8:6]
                             | ((inst >> 7) & 0x38); // offset[5:3]
-                        let addr = self.xregs.read(2).wrapping_add(offset);
+                        let sp = self.xregs.read(2);
+                        let addr = sp.wrapping_add(offset);
                         self.write(addr, self.fregs.read(rs2).to_bits(), DOUBLEWORD)?;
                     }
                     0x6 => {
@@ -3379,7 +3383,7 @@ impl Cpu {
                 let offset = (inst as i32 as i64) >> 20;
                 let target = ((self.xregs.read(rs1) as i64).wrapping_add(offset)) & !1;
 
-                let new_pc = target as u64;
+                let new_pc = (target as u64).wrapping_sub(4);
                 let mut handled = false;
                 if let Some(jh) = &self.jump_handler {
                     if jh.should_handle(new_pc) {
@@ -3388,8 +3392,8 @@ impl Cpu {
                     }
                 }
                 if !handled {
+                    self.xregs.write(REG_RA, self.pc.wrapping_add(4));
                     self.pc = new_pc;
-                    self.xregs.write(rd, self.pc.wrapping_add(4));
                 }
             }
             0x6F => {
@@ -3398,13 +3402,16 @@ impl Cpu {
                 self.debug(inst, "jal");
 
                 // imm[20|10:1|11|19:12] = inst[31|30:21|20|19:12]
-                let offset = (((inst & 0x80000000) as i32 as i64 >> 11) as u64) // imm[20]
-                    | (inst & 0xff000) // imm[19:12]
-                    | ((inst >> 9) & 0x800) // imm[11]
-                    | ((inst >> 20) & 0x7fe); // imm[10:1]
 
-                let new_pc = self.pc.wrapping_add(offset);
+                let imm20 = ((inst & 0x80000000) as i32 as i64 >> 11) as u64; // imm[20]
+                let imm19 = inst & 0xff000; // imm[19:12]
+                let imm11 = (inst >> 9) & 0x800; // imm[11]
+                let imm10 = (inst >> 20) & 0x7fe; // imm[10:1]
+                let offset = imm20 | imm19 | imm11 | imm10;
+
+                let new_pc = self.pc.wrapping_add(offset).wrapping_sub(4);
                 let mut handled = false;
+
                 if let Some(jh) = &self.jump_handler {
                     if jh.should_handle(new_pc) {
                         (self.xregs, self.fregs) = jh.handle(new_pc, self);
@@ -3412,8 +3419,8 @@ impl Cpu {
                     }
                 }
                 if !handled {
+                    self.xregs.write(REG_RA, self.pc.wrapping_add(4));
                     self.pc = new_pc;
-                    self.xregs.write(rd, self.pc.wrapping_add(4));
                 }
             }
             0x73 => {
