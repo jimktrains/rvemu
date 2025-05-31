@@ -810,9 +810,10 @@ impl Cpu {
                         // offset[5:3|7:6] = isnt[12:10|6:5]
                         let offset = ((inst << 1) & 0xc0) // imm[7:6]
                             | ((inst >> 7) & 0x38); // imm[5:3]
-                        let val = f64::from_bits(
-                            self.read(self.xregs.read(rs1).wrapping_add(offset), DOUBLEWORD)?,
-                        );
+                        let rs1_val = self.xregs.read(rs1);
+                        let read_addr = rs1_val.wrapping_add(offset);
+
+                        let val = f64::from_bits(self.read(read_addr, DOUBLEWORD)?);
                         self.fregs.write(rd, val);
                     }
                     0x2 => {
@@ -1721,7 +1722,17 @@ impl Cpu {
                         inst_count!(self, "sd");
                         self.debug(inst, "sd");
 
-                        self.write(addr, self.xregs.read(rs2), DOUBLEWORD)?
+                        //inst[31:25,11:7] = imm[11:5,4:0]
+                        let offset_top = (inst >> 25) << 5;
+                        let offset_bottom = (inst >> 7) & 0x1f;
+                        let offset = offset_top | offset_bottom;
+                        let rs2_val = self.xregs.read(rs2);
+                        let read_addr = rs2_val + offset;
+
+                        //JSK
+
+                        let read_bytes = self.read(read_addr, DOUBLEWORD)?;
+                        self.write(addr, read_bytes, DOUBLEWORD)?
                     }
                     _ => {
                         return Err(Exception::IllegalInstruction(inst));
@@ -3369,11 +3380,14 @@ impl Cpu {
                 let target = ((self.xregs.read(rs1) as i64).wrapping_add(offset)) & !1;
 
                 let new_pc = target as u64;
+                let mut handled = false;
                 if let Some(jh) = &self.jump_handler {
                     if jh.should_handle(new_pc) {
                         (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                        handled = true;
                     }
-                } else {
+                }
+                if !handled {
                     self.pc = new_pc;
                     self.xregs.write(rd, self.pc.wrapping_add(4));
                 }
@@ -3390,11 +3404,14 @@ impl Cpu {
                     | ((inst >> 20) & 0x7fe); // imm[10:1]
 
                 let new_pc = self.pc.wrapping_add(offset);
+                let mut handled = false;
                 if let Some(jh) = &self.jump_handler {
                     if jh.should_handle(new_pc) {
                         (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                        handled = true;
                     }
-                } else {
+                }
+                if !handled {
                     self.pc = new_pc;
                     self.xregs.write(rd, self.pc.wrapping_add(4));
                 }

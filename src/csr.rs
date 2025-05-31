@@ -37,7 +37,7 @@ pub const FCSR: CsrAddress = 0x003;
 
 // User Counter/Timers.
 /// Timer for RDTIME instruction.
-const TIME: CsrAddress = 0xc01;
+pub const TIME: CsrAddress = 0xc01;
 
 /////////////////////////////////////
 // Supervisor-level CSR addresses //
