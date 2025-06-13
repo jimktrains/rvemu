@@ -247,6 +247,9 @@ impl VirtqDesc {
 /// ```
 #[derive(Debug)]
 struct VirtqAvail {
+    // JSK: I am not sure where this is used, but also don't know enough
+    //      to feel comfortable getting rid of it.
+    #[allow(dead_code)]
     flags: u16,
     idx: u16,
     ring_start_addr: u64,

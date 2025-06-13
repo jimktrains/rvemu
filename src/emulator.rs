@@ -1,11 +1,12 @@
 //! The emulator module represents an entire computer.
 
-use crate::cpu::{Cpu, REG_SP};
+use crate::cpu::{Cpu, ExecCycle, REG_SP};
 use crate::devices::dram::Dram;
 //use crate::devices::rom::Rom;
 use crate::devices::uart::Uart;
 use crate::devices::virtio_blk::Virtio;
 use crate::exception::Trap;
+use std::sync::{Arc, Mutex};
 
 // QEMU virt machine:
 // https://github.com/qemu/qemu/blob/master/hw/riscv/virt.c#L46-L63
@@ -51,7 +52,7 @@ impl Emulator {
     /// Constructor for an emulator.
     pub fn new() -> Emulator {
         let mut cpu = Cpu::new();
-        let uart = Box::new(Uart::new(UART_IRQ));
+        let uart = Arc::new(Mutex::new(Uart::new(UART_IRQ)));
         cpu.bus.mount(UART_BASE, uart);
         Self {
             cpu: cpu,
@@ -66,16 +67,17 @@ impl Emulator {
 
     /// Set binary data to the beginning of the DRAM from the emulator console.
     pub fn initialize_dram(&mut self, data: Vec<u8>) {
-        let mut dram = Box::new(Dram::new(DRAM_SIZE));
-        dram.initialize(data);
+        let dram = Arc::new(Mutex::new(Dram::new(DRAM_SIZE)));
+        dram.lock().unwrap().initialize(data);
         self.cpu.bus.mount(DRAM_BASE, dram);
+        self.initialize_sp(DRAM_BASE + DRAM_SIZE);
     }
 
     /// Set binary data to the virtio disk from the emulator console.
     pub fn initialize_disk(&mut self, data: Vec<u8>) {
-        let mut dram = Box::new(Virtio::new(VIRTIO_IRQ));
-        dram.initialize(data);
-        self.cpu.bus.mount(DRAM_BASE, dram);
+        let disk = Arc::new(Mutex::new(Virtio::new(VIRTIO_IRQ)));
+        disk.lock().unwrap().initialize(data);
+        self.cpu.bus.mount(VIRTIO_BASE, disk);
     }
 
     /// Set the program counter to the CPU field.
@@ -103,8 +105,12 @@ impl Emulator {
             }
 
             match self.cpu.execute() {
-                Ok((_, _, inst)) => {
-                    println!("pc: {:#x}, inst: {:#x}", self.cpu.pc.wrapping_sub(4), inst);
+                Ok(ExecCycle::Idle) => {
+                    println!("Idle");
+                    Trap::Requested
+                }
+                Ok(ExecCycle::Opcode(eop)) => {
+                    println!("pc: {:#x}, inst: {:#x}", eop.pc, eop.opcode);
                     Trap::Requested
                 }
                 Err(exception) => {
@@ -135,11 +141,16 @@ impl Emulator {
 
             // Execute an instruction.
             let trap = match self.cpu.execute() {
-                Ok((_, _, inst)) => {
+                Ok(ExecCycle::Idle) => {
+                    println!("Idle");
+                    Trap::Requested
+                }
+                Ok(ExecCycle::Opcode(eop)) => {
                     if self.is_debug {
+                        let inst = eop.opcode;
                         println!(
                             "pc: {:#x}, inst: {:#x}, is_inst 16? {} pre_inst: {:#x}",
-                            self.cpu.pc.wrapping_sub(4),
+                            eop.pc,
                             inst,
                             // Check if an instruction is one of the compressed instructions.
                             inst & 0b11 == 0 || inst & 0b11 == 1 || inst & 0b11 == 2,

@@ -4,6 +4,7 @@
 use crate::devices::clint::Clint;
 use crate::devices::plic::Plic;
 use crate::exception::Exception;
+use std::sync::{Arc, Mutex};
 
 use std::ops::RangeInclusive;
 
@@ -33,7 +34,7 @@ pub trait Device {
 
 /// The system bus.
 pub struct Bus {
-    devices: Vec<(RangeInclusive<u64>, Box<dyn Device>)>,
+    devices: Vec<(RangeInclusive<u64>, Arc<Mutex<dyn Device>>)>,
 
     pub clint: Clint,
     pub plic: Plic,
@@ -58,6 +59,7 @@ impl Bus {
     pub fn is_interrupting(&mut self) -> bool {
         let mut saw_interrupt = false;
         for (_, device) in self.devices.iter_mut() {
+            let mut device = device.lock().unwrap();
             if device.is_interrupting() {
                 if let Some(irq) = device.irq() {
                     self.plic.update_pending(irq);
@@ -68,8 +70,9 @@ impl Bus {
         saw_interrupt
     }
 
-    pub fn mount(&mut self, memory_start: u64, device: Box<dyn Device>) {
-        let addr_range = memory_start..=(memory_start + device.size());
+    pub fn mount(&mut self, memory_start: u64, device: Arc<Mutex<dyn Device>>) {
+        let size = device.lock().unwrap().size();
+        let addr_range = memory_start..=(memory_start + size);
         self.devices.push((addr_range, device));
     }
 
@@ -82,6 +85,7 @@ impl Bus {
         } else {
             for (addr_range, device) in self.devices.iter_mut() {
                 if addr_range.contains(&addr) {
+                    let mut device = device.lock().unwrap();
                     return device.read(addr - addr_range.start(), size);
                 }
             }
@@ -100,6 +104,7 @@ impl Bus {
         } else {
             for (addr_range, device) in self.devices.iter_mut() {
                 if addr_range.contains(&addr) {
+                    let mut device = device.lock().unwrap();
                     return device.write(addr - addr_range.start(), value, size);
                 }
             }
