@@ -122,7 +122,7 @@ pub enum Mode {
 }
 
 /// The integer registers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct XRegisters {
     xregs: [u64; REGISTERS_COUNT],
 }
@@ -195,7 +195,7 @@ impl fmt::Display for XRegisters {
 }
 
 /// The floating-point registers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FRegisters {
     fregs: [f64; REGISTERS_COUNT],
 }
@@ -263,11 +263,13 @@ impl fmt::Display for FRegisters {
     }
 }
 
+#[derive(Debug)]
 pub struct ExecutedOp {
     pub opcode: u64,
     pub pc: u64,
 }
 
+#[derive(Debug)]
 pub enum ExecCycle {
     Idle,
     Opcode(ExecutedOp),
@@ -280,6 +282,11 @@ impl ExecutedOp {
             pc: pc,
         }
     }
+}
+
+pub trait JumpLinkHandler {
+    fn should_handle(&self, new_pc: u64) -> bool;
+    fn handle(&self, new_pc: u64, cpu: &Cpu) -> (XRegisters, FRegisters);
 }
 
 /// The CPU to contain registers, a program counter, status, and a privileged mode.
@@ -311,6 +318,8 @@ pub struct Cpu {
     pub is_count: bool,
     /// Previous instruction. This is for debug.
     pub pre_inst: u64,
+
+    pub jump_handler: Option<Box<dyn JumpLinkHandler>>,
 }
 
 impl Cpu {
@@ -330,7 +339,26 @@ impl Cpu {
             inst_counter: BTreeMap::new(),
             is_count: false,
             pre_inst: 0,
+
+            jump_handler: None,
         }
+    }
+
+    pub fn with_jump_link_handler(&mut self, jh: Box<dyn JumpLinkHandler>) {
+        self.jump_handler = Some(jh);
+    }
+
+    pub fn print_registers(&self) {
+        println!("{}", self.xregs);
+        println!("{}", self.fregs);
+        println!("{}", self.state);
+        println!("pc: {:#x}    prev_instr: {:#x}", self.pc, self.pre_inst);
+    }
+
+    pub fn cycle(&mut self) -> Result<(Option<Interrupt>, ExecCycle), Exception> {
+        let interrupt = self.check_pending_interrupt();
+        self.devices_increment();
+        Ok((interrupt, self.execute()?))
     }
 
     fn debug(&self, _inst: u64, _name: &str) {
@@ -1299,8 +1327,19 @@ impl Cpu {
 
                                     let rs1 = (inst >> 7) & 0x1f;
                                     let t = self.pc.wrapping_add(2);
-                                    self.pc = self.xregs.read(rs1).wrapping_sub(2);
-                                    self.xregs.write(1, t);
+                                    let new_pc = self.xregs.read(rs1).wrapping_sub(2);
+
+                                    let mut handled = false;
+                                    if let Some(jh) = &self.jump_handler {
+                                        if jh.should_handle(new_pc) {
+                                            (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                                            handled = true;
+                                        }
+                                    }
+                                    if !handled {
+                                        self.pc = new_pc;
+                                        self.xregs.write(REG_RA, t);
+                                    }
                                 }
                             }
                             (1, _) => {
@@ -3352,17 +3391,25 @@ impl Cpu {
 
                 let offset = (inst as i32 as i64) >> 20;
                 let target = ((self.xregs.read(rs1) as i64).wrapping_add(offset)) & !1;
-
-                self.pc = (target as u64).wrapping_sub(4);
-
-                self.xregs.write(rd, t);
+                let new_pc = (target as u64).wrapping_sub(4);
+                let mut handled = false;
+                if let Some(jh) = &self.jump_handler {
+                    if jh.should_handle(new_pc) {
+                        (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                        handled = true;
+                    }
+                }
+                if !handled {
+                    self.pc = new_pc;
+                    self.xregs.write(rd, t);
+                }
             }
             0x6F => {
                 // jal
                 inst_count!(self, "jal");
                 self.debug(inst, "jal");
 
-                self.xregs.write(rd, self.pc.wrapping_add(4));
+                let t = self.pc.wrapping_add(4);
 
                 // imm[20|10:1|11|19:12] = inst[31|30:21|20|19:12]
                 let offset = (((inst & 0x80000000) as i32 as i64 >> 11) as u64) // imm[20]
@@ -3370,7 +3417,18 @@ impl Cpu {
                     | ((inst >> 9) & 0x800) // imm[11]
                     | ((inst >> 20) & 0x7fe); // imm[10:1]
 
-                self.pc = self.pc.wrapping_add(offset).wrapping_sub(4);
+                let new_pc = self.pc.wrapping_add(offset).wrapping_sub(4);
+                let mut handled = false;
+                if let Some(jh) = &self.jump_handler {
+                    if jh.should_handle(new_pc) {
+                        (self.xregs, self.fregs) = jh.handle(new_pc, self);
+                        handled = true;
+                    }
+                }
+                if !handled {
+                    self.pc = new_pc;
+                    self.xregs.write(rd, t);
+                }
             }
             0x73 => {
                 // RV32I, RVZicsr, and supervisor ISA
